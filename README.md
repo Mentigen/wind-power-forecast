@@ -149,8 +149,10 @@ All random seeds are fixed via `SEED = 42` in `config.py`. Both models use deter
 | LightGBM (seed=42 only) | 8.73% |
 | LightGBM (5-seed avg, seeds 42-46) | 8.72% |
 | XGBoost | 8.74% |
-| CatBoost | 8.85% |
-| Ensemble 50/50 (LGBM-5seed + XGB) | **8.71%** |
+| CatBoost (default params) | 8.85% |
+| CatBoost (Optuna-tuned, 3-fold CV) | 8.77% |
+| Ensemble 50/50 (LGBM-5seed + XGB) | 8.71% |
+| Ensemble equal 3-way (LGBM-5seed + XGB + CatBoost) | **8.70%** |
 
 ---
 
