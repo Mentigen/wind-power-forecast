@@ -1,0 +1,13 @@
+{
+  "baseline_cv_mae": 9.39728109454147,
+  "best_cv_mae": 9.354511121426597,
+  "improvement": 0.04276997311487207,
+  "params": {
+    "learning_rate": 0.03534953390416622,
+    "depth": 6,
+    "l2_leaf_reg": 2.3170488181163345,
+    "bagging_temperature": 1.5753084724716595,
+    "random_strength": 1.820844601174137,
+    "border_count": 168
+  }
+}
