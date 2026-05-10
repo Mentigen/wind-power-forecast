@@ -2,6 +2,7 @@
 
 Strategy:
   - All models train on capacity factor (CF = generation / available_capacity)
+  - LightGBM uses 5-seed averaging (seeds 42-46) to reduce variance
   - Best ensemble selected by val MAE comparison on fixed-weight combinations
   - Models retrained on full data after hyperparameter selection via Q1-2025 holdout
 """
@@ -32,6 +33,8 @@ DATA_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..", "dataset_extracted", "dataset", "train_dataset.csv"
 )
+
+LGBM_SEEDS = [SEED + i for i in range(5)]  # [42, 43, 44, 45, 46]
 
 # Hyperparameters found via Optuna search (25 trials, Q1-2025 holdout)
 LGBM_PARAMS = {
@@ -117,12 +120,15 @@ def clip_predictions(preds: np.ndarray, repairs) -> np.ndarray:
     return np.clip(preds, 0.0, max_cap)
 
 
-def train_lgbm(X_train, y_train, X_val=None, y_val=None, n_estimators_override=None):
+def train_lgbm(X_train, y_train, X_val=None, y_val=None,
+               n_estimators_override=None, seed_override=None):
     params = {**LGBM_PARAMS}
-    if n_estimators_override:
+    if n_estimators_override is not None:
         params["n_estimators"] = n_estimators_override
+    if seed_override is not None:
+        params["seed"] = seed_override
     dtrain = lgb.Dataset(X_train, label=y_train)
-    callbacks = [lgb.log_evaluation(period=200)]
+    callbacks = [lgb.log_evaluation(period=500)]
     valid_sets = [dtrain]
     if X_val is not None:
         dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
@@ -179,13 +185,26 @@ def main():
     print(f"  Features: {X_train.shape[1]}")
 
     # ---- Step 1: hyperparameter selection via Q1-2025 holdout ----
-    print("\nStep 1: Training LightGBM on CF target (early stopping Q1-2025)...")
-    lgbm_val = train_lgbm(X_train, y_train_cf, X_val, y_val_cf)
-    lgbm_best_n = lgbm_val.best_iteration
-    lgbm_pred_val = lgbm_val.predict(X_val) * avail_cap_val
-    lgbm_pred_val = clip_predictions(lgbm_pred_val, val_repairs)
+
+    # LightGBM: find best n_estimators via seed=42 early stopping
+    print("\nStep 1: LightGBM seed=42 early stopping to find best n_estimators...")
+    lgbm_s42 = train_lgbm(X_train, y_train_cf, X_val, y_val_cf)
+    lgbm_best_n = lgbm_s42.best_iteration
+    print(f"  Best n_estimators: {lgbm_best_n}")
+
+    # Evaluate 5-seed average on val (no early stopping, fixed n_estimators)
+    print(f"  Evaluating 5-seed average (seeds {LGBM_SEEDS})...")
+    lgbm_val_preds = []
+    for seed in LGBM_SEEDS:
+        m = train_lgbm(X_train, y_train_cf, n_estimators_override=lgbm_best_n, seed_override=seed)
+        pred = clip_predictions(m.predict(X_val) * avail_cap_val, val_repairs)
+        lgbm_val_preds.append(pred)
+    lgbm_pred_val = np.mean(lgbm_val_preds, axis=0)
     mae_lgbm = normalized_mae(y_val, lgbm_pred_val)
-    print(f"  Best n_estimators: {lgbm_best_n} | Val MAE: {mae_lgbm:.4f}%")
+    # Also report single-seed for comparison
+    mae_lgbm_s42 = normalized_mae(y_val, lgbm_val_preds[0])
+    print(f"  Val MAE single (seed=42): {mae_lgbm_s42:.4f}%")
+    print(f"  Val MAE 5-seed avg:       {mae_lgbm:.4f}%")
 
     print("\nStep 1: Training XGBoost on CF target (early stopping Q1-2025)...")
     xgb_val = train_xgb(X_train.values, y_train_cf, X_val.values, y_val_cf)
@@ -203,7 +222,7 @@ def main():
     mae_cb = normalized_mae(y_val, cb_pred_val)
     print(f"  Best n_estimators: {cb_best_n} | Val MAE: {mae_cb:.4f}%")
 
-    # Fixed-weight ensemble comparison (model selection, no weight optimization on val)
+    # Fixed-weight ensemble comparison
     ens_2eq = (lgbm_pred_val + xgb_pred_val) / 2.0
     mae_2eq = normalized_mae(y_val, clip_predictions(ens_2eq, val_repairs))
 
@@ -217,9 +236,13 @@ def main():
     ens_2w = w_lgbm * lgbm_pred_val + w_xgb * xgb_pred_val
     mae_2w = normalized_mae(y_val, clip_predictions(ens_2w, val_repairs))
 
-    print(f"\n  Ensemble 50/50 (LGBM+XGB) val MAE: {mae_2eq:.4f}%")
-    print(f"  Ensemble weighted (LGBM+XGB) val MAE: {mae_2w:.4f}%")
+    print(f"\n  Ensemble 50/50 (LGBM-avg + XGB) val MAE: {mae_2eq:.4f}%")
+    print(f"  Ensemble weighted (LGBM-avg + XGB) val MAE: {mae_2w:.4f}%")
     print(f"  Ensemble equal 3-way val MAE: {mae_3eq:.4f}%")
+
+    # Prefer equal_2 over weighted_2 if the margin is within noise (< 0.02%)
+    if mae_2eq - mae_2w < 0.02:
+        mae_2w = mae_2eq + 1e-9  # force equal_2 to win
 
     candidates = {
         "lgbm": mae_lgbm,
@@ -245,16 +268,28 @@ def main():
     lgbm_n_full = int(lgbm_best_n * 1.1)
     xgb_n_full = int(xgb_best_n * 1.1)
     cb_n_full = int(cb_best_n * 1.1)
-    print(f"  LightGBM n_estimators: {lgbm_n_full}")
+    print(f"  LightGBM n_estimators (per seed): {lgbm_n_full}")
     print(f"  XGBoost n_estimators: {xgb_n_full}")
     print(f"  CatBoost n_estimators: {cb_n_full}")
 
-    lgbm_final = train_lgbm(X_full, y_full_cf, n_estimators_override=lgbm_n_full)
+    # Train 5 LGBM seeds on full data
+    print(f"  Training LGBM x{len(LGBM_SEEDS)} seeds on full data...")
+    lgbm_finals = []
+    for seed in LGBM_SEEDS:
+        m = train_lgbm(X_full, y_full_cf, n_estimators_override=lgbm_n_full, seed_override=seed)
+        lgbm_finals.append(m)
+
     xgb_final = train_xgb(X_full.values, y_full_cf, n_estimators_override=xgb_n_full)
     cb_final = train_catboost(X_full.values, y_full_cf, n_estimators_override=cb_n_full)
 
+    # Save LGBM seed models (lgbm_model.pkl = seed=42 for backwards compat)
+    for m, seed in zip(lgbm_finals, LGBM_SEEDS):
+        fname = f"models/lgbm_seed{seed}.pkl"
+        with open(fname, "wb") as f:
+            pickle.dump(m, f)
     with open("models/lgbm_model.pkl", "wb") as f:
-        pickle.dump(lgbm_final, f)
+        pickle.dump(lgbm_finals[0], f)  # seed=42 alias
+
     with open("models/xgb_model.pkl", "wb") as f:
         pickle.dump(xgb_final, f)
     with open("models/catboost_model.pkl", "wb") as f:
@@ -262,9 +297,12 @@ def main():
 
     meta = {
         "ensemble_mode": ensemble_mode,
+        "lgbm_mode": "multiseed",
+        "lgbm_seeds": LGBM_SEEDS,
         "w_lgbm": w_lgbm,
         "w_xgb": w_xgb,
-        "mae_lgbm": mae_lgbm,
+        "mae_lgbm_s42": mae_lgbm_s42,
+        "mae_lgbm_avg": mae_lgbm,
         "mae_xgb": mae_xgb,
         "mae_catboost": mae_cb,
         "mae_ensemble": best_val_mae,

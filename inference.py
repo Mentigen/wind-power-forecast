@@ -31,8 +31,6 @@ def main():
     print(f"  Date range: {df_valid[DATETIME_COL].min()} - {df_valid[DATETIME_COL].max()}")
 
     print("Loading models...")
-    with open("models/lgbm_model.pkl", "rb") as f:
-        lgbm_model = pickle.load(f)
     with open("models/xgb_model.pkl", "rb") as f:
         xgb_model = pickle.load(f)
     with open("models/meta.pkl", "rb") as f:
@@ -40,17 +38,31 @@ def main():
 
     seasonal_avg = meta.get("seasonal_avg")
     ensemble_mode = meta.get("ensemble_mode", "lgbm")
+    lgbm_mode = meta.get("lgbm_mode", "single")
+    lgbm_seeds = meta.get("lgbm_seeds", [42])
     w_lgbm = meta.get("w_lgbm", 0.5)
     w_xgb = meta.get("w_xgb", 0.5)
     print(f"  Best val MAE (Q1-2025): {meta['best_mae']:.4f}%")
-    print(f"  Ensemble mode: {ensemble_mode}")
+    print(f"  Ensemble mode: {ensemble_mode} | LGBM mode: {lgbm_mode}")
 
     # Build features preserving original row order (descending date = grader alignment)
     X_valid = make_features(df_valid, seasonal_avg)
     valid_repairs = df_valid[REPAIRS_COL]
     avail_cap = (NUM_TURBINES - valid_repairs.values) * TURBINE_CAPACITY
 
-    lgbm_pred = lgbm_model.predict(X_valid) * avail_cap
+    if lgbm_mode == "multiseed":
+        lgbm_preds = []
+        for seed in lgbm_seeds:
+            with open(f"models/lgbm_seed{seed}.pkl", "rb") as f:
+                m = pickle.load(f)
+            lgbm_preds.append(m.predict(X_valid) * avail_cap)
+        lgbm_pred = np.mean(lgbm_preds, axis=0)
+        print(f"  LGBM: averaged {len(lgbm_seeds)} seeds {lgbm_seeds}")
+    else:
+        with open("models/lgbm_model.pkl", "rb") as f:
+            lgbm_model = pickle.load(f)
+        lgbm_pred = lgbm_model.predict(X_valid) * avail_cap
+
     xgb_pred = xgb_model.predict(X_valid.values) * avail_cap
 
     # Load CatBoost if ensemble mode requires it
