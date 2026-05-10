@@ -1,10 +1,9 @@
-"""Train LightGBM + XGBoost models for wind power forecasting.
+"""Train LightGBM + XGBoost + CatBoost models for wind power forecasting.
 
 Strategy:
-  - LightGBM trains on capacity factor (CF = generation / available_capacity)
-  - XGBoost trains on raw MWh generation
-  - Diverse targets create better ensemble diversity
-  - Both models are retrained on full data after hyperparameter selection via Q1-2025 holdout
+  - All models train on capacity factor (CF = generation / available_capacity)
+  - Best ensemble selected by val MAE comparison on fixed-weight combinations
+  - Models retrained on full data after hyperparameter selection via Q1-2025 holdout
 """
 import os
 import pickle
@@ -16,6 +15,7 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 import xgboost as xgb
+from catboost import CatBoostRegressor
 
 from config import (
     SEED, TARGET_COL, DATETIME_COL, REPAIRS_COL,
@@ -69,6 +69,19 @@ XGB_PARAMS = {
     "verbosity": 0,
     "early_stopping_rounds": 150,
     "eval_metric": "mae",
+}
+
+CATBOOST_PARAMS = {
+    "loss_function": "MAE",
+    "eval_metric": "MAE",
+    "iterations": 5000,
+    "learning_rate": 0.03,
+    "depth": 6,
+    "l2_leaf_reg": 3.0,
+    "random_seed": SEED,
+    "thread_count": 1,
+    "early_stopping_rounds": 100,
+    "verbose": False,
 }
 
 
@@ -131,6 +144,19 @@ def train_xgb(X_train, y_train, X_val=None, y_val=None, n_estimators_override=No
     return model
 
 
+def train_catboost(X_train, y_train, X_val=None, y_val=None, n_estimators_override=None):
+    params = {**CATBOOST_PARAMS}
+    if n_estimators_override is not None:
+        params["iterations"] = n_estimators_override
+        params.pop("early_stopping_rounds", None)
+    model = CatBoostRegressor(**params)
+    if X_val is not None:
+        model.fit(X_train, y_train, eval_set=(X_val, y_val))
+    else:
+        model.fit(X_train, y_train)
+    return model
+
+
 def main():
     print("Loading data...")
     df = load_data(DATA_PATH)
@@ -169,28 +195,43 @@ def main():
     mae_xgb = normalized_mae(y_val, xgb_pred_val)
     print(f"  Best n_estimators: {xgb_best_n} | Val MAE: {mae_xgb:.4f}%")
 
-    # Weighted ensemble (0.6/0.4 toward better model)
+    print("\nStep 1: Training CatBoost on CF target (early stopping Q1-2025)...")
+    cb_val = train_catboost(X_train.values, y_train_cf, X_val.values, y_val_cf)
+    cb_best_n = cb_val.best_iteration_
+    cb_pred_val = cb_val.predict(X_val.values) * avail_cap_val
+    cb_pred_val = clip_predictions(cb_pred_val, val_repairs)
+    mae_cb = normalized_mae(y_val, cb_pred_val)
+    print(f"  Best n_estimators: {cb_best_n} | Val MAE: {mae_cb:.4f}%")
+
+    # Fixed-weight ensemble comparison (model selection, no weight optimization on val)
+    ens_2eq = (lgbm_pred_val + xgb_pred_val) / 2.0
+    mae_2eq = normalized_mae(y_val, clip_predictions(ens_2eq, val_repairs))
+
+    ens_3eq = (lgbm_pred_val + xgb_pred_val + cb_pred_val) / 3.0
+    mae_3eq = normalized_mae(y_val, clip_predictions(ens_3eq, val_repairs))
+
     if mae_lgbm <= mae_xgb:
         w_lgbm, w_xgb = 0.6, 0.4
     else:
         w_lgbm, w_xgb = 0.4, 0.6
-    ens_pred = w_lgbm * lgbm_pred_val + w_xgb * xgb_pred_val
-    mae_ens_w = normalized_mae(y_val, clip_predictions(ens_pred, val_repairs))
-    ens_equal = (lgbm_pred_val + xgb_pred_val) / 2.0
-    mae_ens_eq = normalized_mae(y_val, clip_predictions(ens_equal, val_repairs))
-    print(f"\n  Ensemble 50/50 val MAE: {mae_ens_eq:.4f}%")
-    print(f"  Ensemble weighted val MAE: {mae_ens_w:.4f}%")
+    ens_2w = w_lgbm * lgbm_pred_val + w_xgb * xgb_pred_val
+    mae_2w = normalized_mae(y_val, clip_predictions(ens_2w, val_repairs))
 
-    best_val_mae = min(mae_lgbm, mae_xgb, mae_ens_w, mae_ens_eq)
-    if best_val_mae == mae_lgbm:
-        ensemble_mode = "lgbm"
-    elif best_val_mae == mae_xgb:
-        ensemble_mode = "xgb"
-    elif best_val_mae == mae_ens_eq:
-        ensemble_mode = "equal"
-    else:
-        ensemble_mode = "weighted"
-    print(f"  Best mode: {ensemble_mode} | Best val MAE: {best_val_mae:.4f}%")
+    print(f"\n  Ensemble 50/50 (LGBM+XGB) val MAE: {mae_2eq:.4f}%")
+    print(f"  Ensemble weighted (LGBM+XGB) val MAE: {mae_2w:.4f}%")
+    print(f"  Ensemble equal 3-way val MAE: {mae_3eq:.4f}%")
+
+    candidates = {
+        "lgbm": mae_lgbm,
+        "xgb": mae_xgb,
+        "catboost": mae_cb,
+        "equal_2": mae_2eq,
+        "weighted_2": mae_2w,
+        "equal_3": mae_3eq,
+    }
+    ensemble_mode = min(candidates, key=candidates.get)
+    best_val_mae = candidates[ensemble_mode]
+    print(f"\n  Best mode: {ensemble_mode} | Best val MAE: {best_val_mae:.4f}%")
 
     # ---- Step 2: retrain on FULL dataset ----
     print("\nStep 2: Retraining on FULL dataset with best n_estimators...")
@@ -203,16 +244,21 @@ def main():
 
     lgbm_n_full = int(lgbm_best_n * 1.1)
     xgb_n_full = int(xgb_best_n * 1.1)
+    cb_n_full = int(cb_best_n * 1.1)
     print(f"  LightGBM n_estimators: {lgbm_n_full}")
     print(f"  XGBoost n_estimators: {xgb_n_full}")
+    print(f"  CatBoost n_estimators: {cb_n_full}")
 
     lgbm_final = train_lgbm(X_full, y_full_cf, n_estimators_override=lgbm_n_full)
     xgb_final = train_xgb(X_full.values, y_full_cf, n_estimators_override=xgb_n_full)
+    cb_final = train_catboost(X_full.values, y_full_cf, n_estimators_override=cb_n_full)
 
     with open("models/lgbm_model.pkl", "wb") as f:
         pickle.dump(lgbm_final, f)
     with open("models/xgb_model.pkl", "wb") as f:
         pickle.dump(xgb_final, f)
+    with open("models/catboost_model.pkl", "wb") as f:
+        pickle.dump(cb_final, f)
 
     meta = {
         "ensemble_mode": ensemble_mode,
@@ -220,6 +266,7 @@ def main():
         "w_xgb": w_xgb,
         "mae_lgbm": mae_lgbm,
         "mae_xgb": mae_xgb,
+        "mae_catboost": mae_cb,
         "mae_ensemble": best_val_mae,
         "best_mae": best_val_mae,
         "feature_names": list(X_full.columns),

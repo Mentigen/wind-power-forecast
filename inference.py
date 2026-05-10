@@ -50,12 +50,28 @@ def main():
     valid_repairs = df_valid[REPAIRS_COL]
     avail_cap = (NUM_TURBINES - valid_repairs.values) * TURBINE_CAPACITY
 
-    lgbm_pred = lgbm_model.predict(X_valid) * avail_cap   # CF -> MWh
-    xgb_pred = xgb_model.predict(X_valid.values) * avail_cap   # CF -> MWh
+    lgbm_pred = lgbm_model.predict(X_valid) * avail_cap
+    xgb_pred = xgb_model.predict(X_valid.values) * avail_cap
 
-    if ensemble_mode == "equal":
+    # Load CatBoost if ensemble mode requires it
+    cb_pred = None
+    if ensemble_mode in ("catboost", "equal_3"):
+        cb_path = "models/catboost_model.pkl"
+        if os.path.exists(cb_path):
+            with open(cb_path, "rb") as f:
+                cb_model = pickle.load(f)
+            cb_pred = cb_model.predict(X_valid.values) * avail_cap
+        else:
+            print("  Warning: catboost_model.pkl not found, falling back to equal_2")
+            ensemble_mode = "equal_2"
+
+    if ensemble_mode == "equal_3" and cb_pred is not None:
+        preds = (lgbm_pred + xgb_pred + cb_pred) / 3.0
+    elif ensemble_mode == "catboost" and cb_pred is not None:
+        preds = cb_pred
+    elif ensemble_mode == "equal_2":
         preds = (lgbm_pred + xgb_pred) / 2.0
-    elif ensemble_mode == "weighted":
+    elif ensemble_mode == "weighted_2":
         preds = w_lgbm * lgbm_pred + w_xgb * xgb_pred
     elif ensemble_mode == "xgb":
         preds = xgb_pred
