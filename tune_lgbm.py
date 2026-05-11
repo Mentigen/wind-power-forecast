@@ -76,9 +76,8 @@ def cv_eval(params, df):
     maes = []
     for df_train, df_val in splitter.split_dataframes(df):
         seasonal_avg = build_seasonal_avg(df_train)
-        dsa = build_direction_speed_avg(df_train)
-        X_tr = make_features(df_train, seasonal_avg, dsa)
-        X_v = make_features(df_val, seasonal_avg, dsa)
+        X_tr = make_features(df_train, seasonal_avg)
+        X_v = make_features(df_val, seasonal_avg)
         avail_tr = get_avail_cap(df_train[REPAIRS_COL])
         avail_v = get_avail_cap(df_val[REPAIRS_COL])
         y_tr_cf = df_train[TARGET_COL].values / avail_tr
