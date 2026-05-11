@@ -26,6 +26,7 @@ import lightgbm as lgb
 
 from config import SEED, TARGET_COL, DATETIME_COL, REPAIRS_COL, NUM_TURBINES, TURBINE_CAPACITY
 from features import make_features
+from train import build_direction_speed_avg
 from cv_splitter import Q1TimeSeriesSplit
 
 DATA_PATH = os.path.join(
@@ -33,7 +34,7 @@ DATA_PATH = os.path.join(
     "..", "dataset_extracted", "dataset", "train_dataset.csv"
 )
 
-N_TRIALS = 25
+N_TRIALS = 40
 CAPACITY = 90.09
 IMPROVEMENT_THRESHOLD = 0.02
 
@@ -75,8 +76,9 @@ def cv_eval(params, df):
     maes = []
     for df_train, df_val in splitter.split_dataframes(df):
         seasonal_avg = build_seasonal_avg(df_train)
-        X_tr = make_features(df_train, seasonal_avg)
-        X_v = make_features(df_val, seasonal_avg)
+        dsa = build_direction_speed_avg(df_train)
+        X_tr = make_features(df_train, seasonal_avg, dsa)
+        X_v = make_features(df_val, seasonal_avg, dsa)
         avail_tr = get_avail_cap(df_train[REPAIRS_COL])
         avail_v = get_avail_cap(df_val[REPAIRS_COL])
         y_tr_cf = df_train[TARGET_COL].values / avail_tr
@@ -182,15 +184,15 @@ def main():
         "objective": "regression_l1",
         "metric": "mae",
         "n_estimators": 5000,
-        "learning_rate": 0.01693,
-        "max_depth": 6,
-        "num_leaves": 44,
-        "feature_fraction": 0.5959,
-        "bagging_fraction": 0.5591,
+        "learning_rate": 0.03545,
+        "max_depth": 4,
+        "num_leaves": 87,
+        "feature_fraction": 0.4026,
+        "bagging_fraction": 0.5826,
         "bagging_freq": 1,
-        "min_child_samples": 23,
-        "reg_alpha": 0.4697,
-        "reg_lambda": 0.2292,
+        "min_child_samples": 29,
+        "reg_alpha": 0.1076,
+        "reg_lambda": 0.2753,
         "seed": SEED,
         "deterministic": True,
         "force_row_wise": True,

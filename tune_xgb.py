@@ -23,6 +23,7 @@ import xgboost as xgb
 
 from config import SEED, TARGET_COL, DATETIME_COL, REPAIRS_COL, NUM_TURBINES, TURBINE_CAPACITY
 from features import make_features
+from train import build_direction_speed_avg
 from cv_splitter import Q1TimeSeriesSplit
 
 DATA_PATH = os.path.join(
@@ -30,7 +31,7 @@ DATA_PATH = os.path.join(
     "..", "dataset_extracted", "dataset", "train_dataset.csv"
 )
 
-N_TRIALS = 20
+N_TRIALS = 30
 CAPACITY = 90.09
 IMPROVEMENT_THRESHOLD = 0.02
 
@@ -61,8 +62,9 @@ def cv_eval(params, df):
     maes = []
     for df_train, df_val in splitter.split_dataframes(df):
         seasonal_avg = build_seasonal_avg(df_train)
-        X_tr = make_features(df_train, seasonal_avg).values
-        X_v = make_features(df_val, seasonal_avg).values
+        dsa = build_direction_speed_avg(df_train)
+        X_tr = make_features(df_train, seasonal_avg, dsa).values
+        X_v = make_features(df_val, seasonal_avg, dsa).values
         avail_tr = get_avail_cap(df_train[REPAIRS_COL])
         avail_v = get_avail_cap(df_val[REPAIRS_COL])
         y_tr_cf = df_train[TARGET_COL].values / avail_tr

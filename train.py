@@ -60,13 +60,13 @@ LGBM_PARAMS = {
 XGB_PARAMS = {
     "objective": "reg:absoluteerror",
     "n_estimators": 5000,
-    "learning_rate": 0.04345,
-    "max_depth": 4,
-    "subsample": 0.7289,
-    "colsample_bytree": 0.6404,
-    "min_child_weight": 5,
-    "reg_alpha": 0.8049,
-    "reg_lambda": 0.2256,
+    "learning_rate": 0.01284,
+    "max_depth": 7,
+    "subsample": 0.5028,
+    "colsample_bytree": 0.7240,
+    "min_child_weight": 35,
+    "reg_alpha": 0.0265,
+    "reg_lambda": 0.3562,
     "seed": SEED,
     "nthread": 1,
     "verbosity": 0,
@@ -111,6 +111,20 @@ def build_seasonal_avg(df: pd.DataFrame) -> pd.Series:
     return df.groupby(
         [df["month"].astype(int), df["hour_of_day"].astype(int), df[REPAIRS_COL].astype(int)]
     )[TARGET_COL].mean()
+
+
+def build_direction_speed_avg(df: pd.DataFrame) -> pd.Series:
+    """Mean CF by (season_quarter, ws80_bin, wind_direction_sector, repairs)."""
+    avail = (NUM_TURBINES - df[REPAIRS_COL]) * TURBINE_CAPACITY
+    cf = df[TARGET_COL] / avail.clip(lower=0.01)
+    quarter = ((df["month"].astype(int) - 1) // 3)
+    ws_bin = pd.cut(df["wind_speed_80m"], bins=[0, 3, 6, 9, 12, 100],
+                    labels=[0, 1, 2, 3, 4]).cat.add_categories(-1).fillna(-1).astype(int).clip(0, 4)
+    dir_sector = (df["wind_direction_80m"] * 8).astype(int).clip(0, 7)
+    keys = pd.DataFrame({"quarter": quarter, "ws_bin": ws_bin,
+                         "dir_sector": dir_sector, "repairs": df[REPAIRS_COL].astype(int)})
+    return cf.groupby([keys["quarter"], keys["ws_bin"],
+                       keys["dir_sector"], keys["repairs"]]).mean()
 
 
 def clip_predictions(preds: np.ndarray, repairs) -> np.ndarray:

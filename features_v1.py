@@ -6,36 +6,6 @@ from config import NUM_TURBINES, TURBINE_CAPACITY, REPAIRS_COL, DATETIME_COL
 
 CUT_IN_SPEED = 3.0      # m/s
 RATED_SPEED = 12.5      # m/s
-CUT_OUT_SPEED = 25.0    # m/s
-
-ROTOR_RADIUS = 66.0              # m (SG 3.4-132: 132m rotor / 2)
-ROTOR_AREA = math.pi * ROTOR_RADIUS ** 2   # m^2
-R_DRY_AIR = 287.05               # J/(kg·K)
-REF_AIR_DENSITY = 1.225          # kg/m^3 (ISO standard at 15°C, 1013 hPa)
-
-# SG 3.4-132 empirical power curve (wind speed m/s → fraction of rated power)
-# Source: Siemens Gamesa product data, scaled to 3.465 MW rated.
-# Values at integer + half-integer wind speeds, interpolated linearly in code.
-_SG_CURVE_WS = np.array([
-    0.0, 1.0, 2.0, 3.0, 3.5,
-    4.0, 4.5, 5.0, 5.5, 6.0,
-    6.5, 7.0, 7.5, 8.0, 8.5,
-    9.0, 9.5, 10.0, 10.5, 11.0,
-    11.5, 12.0, 12.5, 25.0, 25.5, 30.0,
-], dtype=float)
-
-_SG_CURVE_FRAC = np.array([
-    0.000, 0.000, 0.000, 0.000, 0.012,
-    0.046, 0.101, 0.175, 0.280, 0.397,
-    0.519, 0.639, 0.749, 0.841, 0.910,
-    0.958, 0.984, 0.997, 1.000, 1.000,
-    1.000, 1.000, 1.000, 1.000, 0.000, 0.000,
-], dtype=float)
-
-
-def _sg_power_fraction(ws: np.ndarray) -> np.ndarray:
-    """Interpolate SG 3.4-132 power curve: wind speed (m/s) → fraction of rated."""
-    return np.interp(ws, _SG_CURVE_WS, _SG_CURVE_FRAC)
 
 
 def _impute_180m(df: pd.DataFrame) -> pd.DataFrame:
@@ -56,19 +26,22 @@ def _impute_180m(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _rolling_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Rolling window statistics on meteorological forecast data.
+    """Compute rolling window statistics on meteorological forecast data.
 
-    Resamples to a complete hourly grid to handle gaps, computes rolling stats,
-    then rejoins on original timestamps.
+    The data may have gaps, so we resample to a complete hourly grid,
+    compute rolling stats, then join back on the original timestamps.
     """
     if DATETIME_COL not in df.columns:
         return pd.DataFrame(index=df.index)
 
+    dt = pd.to_datetime(df[DATETIME_COL])
+    # Work in sorted chronological order on a complete hourly grid
     temp = df[[DATETIME_COL, "wind_speed_80m", "wind_speed_120m",
                "pressure_msl", "wind_gusts_10m", "temperature_80m"]].copy()
     temp[DATETIME_COL] = pd.to_datetime(temp[DATETIME_COL])
     temp = temp.set_index(DATETIME_COL).sort_index()
 
+    # Resample to complete hourly grid (forward-fill short gaps for rolling)
     full_idx = pd.date_range(temp.index.min(), temp.index.max(), freq="h")
     temp = temp.reindex(full_idx).interpolate(method="linear", limit=6)
 
@@ -88,18 +61,11 @@ def _rolling_features(df: pd.DataFrame) -> pd.DataFrame:
         temp["wind_gusts_10m"] - temp["wind_gusts_10m"].rolling(6, min_periods=1).mean()
     )
 
+    # Join back on original timestamps
     orig_dt = pd.to_datetime(df[DATETIME_COL])
     result = roll_feats.reindex(orig_dt.values)
     result.index = df.index
-    return result.fillna(0.0)
-
-
-def _circular_diff_rad(a_frac: pd.Series, b_frac: pd.Series) -> pd.Series:
-    """Angular difference (radians) between two directions in [0,1] fraction-of-360."""
-    a_rad = a_frac * 2.0 * math.pi
-    b_rad = b_frac * 2.0 * math.pi
-    diff = a_rad - b_rad
-    return np.arctan2(np.sin(diff), np.cos(diff))
+    return result
 
 
 def _power_curve_output(ws: pd.Series, turbines: pd.Series) -> pd.Series:
@@ -143,28 +109,8 @@ def make_features(df: pd.DataFrame, seasonal_avg: pd.Series = None) -> pd.DataFr
     feats["ws80_cubed"] = ws80 ** 3
     feats["ws120_cubed"] = ws120 ** 3
 
-    # ---- theoretical power curve output (cubic approximation) ----
+    # ---- theoretical power curve output ----
     feats["theoretical_power"] = _power_curve_output(ws80, available_turbines)
-
-    # ---- real SG 3.4-132 power curve output ----
-    sg_frac = _sg_power_fraction(ws80.values)
-    feats["sg_power_output"] = sg_frac * TURBINE_CAPACITY * available_turbines
-    feats["sg_power_frac"] = sg_frac  # model-level capacity factor
-
-    # ---- air density (exact): rho = P_Pa / (R * T_K) ----
-    t_kelvin = df["temperature_80m"] + 273.15
-    p_pascal = df["pressure_msl"] * 100.0   # hPa → Pa
-    air_density = p_pascal / (R_DRY_AIR * t_kelvin)
-    feats["air_density"] = air_density
-
-    # ---- density-corrected power estimate: P_rho ~ rho/rho_ref * P_theoretical ----
-    # Wind power scales linearly with air density, so cold dense air = more power
-    density_ratio = air_density / REF_AIR_DENSITY
-    feats["density_ratio"] = density_ratio
-    feats["sg_power_density_corrected"] = feats["sg_power_output"] * density_ratio
-
-    # ---- exact kinetic energy flux: 0.5 * rho * A * v^3 (physical Betz power) ----
-    feats["kinetic_power_80m"] = 0.5 * air_density * ROTOR_AREA * (ws80 ** 3) * available_turbines / 1e6
 
     # ---- power potential scaled by available turbines ----
     feats["power_physics"] = feats["ws80_cubed"] * available_turbines
@@ -174,7 +120,7 @@ def make_features(df: pd.DataFrame, seasonal_avg: pd.Series = None) -> pd.DataFr
     feats["partial_power"] = ((ws80 >= CUT_IN_SPEED) & (ws80 < RATED_SPEED)).astype(int)
     feats["at_rated"] = (ws80 >= RATED_SPEED).astype(int)
 
-    # ---- wind shear (vertical speed gradient) ----
+    # ---- wind shear (vertical gradient) ----
     feats["wind_shear_80_10"] = ws80 - df["wind_speed_10m"]
     feats["wind_shear_120_80"] = ws120 - ws80
     feats["wind_shear_180_80"] = df["wind_speed_180m"] - ws80
@@ -184,13 +130,7 @@ def make_features(df: pd.DataFrame, seasonal_avg: pd.Series = None) -> pd.DataFr
     ws80_safe = ws80.clip(lower=0.01)
     feats["shear_exponent"] = np.log(ws80_safe / ws10_safe) / math.log(80 / 10)
 
-    # ---- wind veer: direction change with height (atmospheric stability indicator) ----
-    # Positive veer (clockwise with height) is typical in stable conditions
-    feats["wind_veer_10_80"] = _circular_diff_rad(df["wind_direction_80m"], df["wind_direction_10m"])
-    feats["wind_veer_80_120"] = _circular_diff_rad(df["wind_direction_120m"], df["wind_direction_80m"])
-    feats["wind_veer_80_180"] = _circular_diff_rad(df["wind_direction_180m"], df["wind_direction_80m"])
-
-    # ---- turbulence proxy: gust-to-mean ratio ----
+    # ---- turbulence proxy ----
     feats["turbulence"] = df["wind_gusts_10m"] / (df["wind_speed_10m"] + 0.1)
 
     # ---- wind direction: cyclic encoding (direction in [0,1] = fraction of 360deg) ----
@@ -200,13 +140,10 @@ def make_features(df: pd.DataFrame, seasonal_avg: pd.Series = None) -> pd.DataFr
         feats[f"wd_{height}_sin"] = np.sin(angle)
         feats[f"wd_{height}_cos"] = np.cos(angle)
 
-    # ---- u/v wind components at hub height and above ----
+    # ---- u/v wind components at hub height ----
     angle_80 = df["wind_direction_80m"] * 2.0 * math.pi
-    angle_120 = df["wind_direction_120m"] * 2.0 * math.pi
     feats["u_component_80m"] = ws80 * np.sin(angle_80)
     feats["v_component_80m"] = ws80 * np.cos(angle_80)
-    feats["u_component_120m"] = ws120 * np.sin(angle_120)
-    feats["v_component_120m"] = ws120 * np.cos(angle_120)
 
     # ---- time: cyclic encoding ----
     month = df["month"].astype(float)
@@ -218,26 +155,9 @@ def make_features(df: pd.DataFrame, seasonal_avg: pd.Series = None) -> pd.DataFr
     feats["month"] = month
     feats["hour_of_day"] = hour
 
-    # ---- air density proxy (original, kept for backwards compat) ----
+    # ---- air density proxy ----
     feats["temp_delta_80_120"] = df["temperature_80m"] - df["temperature_120m"]
     feats["air_density_proxy"] = df["pressure_msl"] / (df["temperature_80m"] + 273.15)
-
-    # ---- rotor-equivalent wind speed via shear extrapolation ----
-    # Integrates v^3 across rotor disc using power-law wind profile
-    # ws_eff = (1/H * integral_{h_bot}^{h_top} ws(h)^3 dh)^(1/3)
-    # where ws(h) = ws80 * (h/80)^alpha
-    alpha = feats["shear_exponent"].clip(-0.5, 1.0).values
-    h_bot, h_hub, h_top = 14.0, 80.0, 146.0
-    rotor_h = h_top - h_bot
-    # Analytic integral: integral of (h/h_hub)^(3*alpha) dh from h_bot to h_top
-    a3 = 3.0 * alpha + 1.0
-    # Use simple 3-point Gaussian-like quadrature to avoid division by zero when alpha=-1/3
-    safe_a3 = np.where(np.abs(a3) > 0.05, a3, 0.05)
-    integral = (h_hub ** (-3 * alpha)) * (h_top ** a3 - h_bot ** a3) / safe_a3
-    ws80_safe2 = ws80.values.clip(0.01)
-    ws_eff3 = ws80_safe2 ** 3 * integral / rotor_h
-    feats["ws_rotor_eff"] = np.where(ws_eff3 > 0, ws_eff3 ** (1.0 / 3.0), 0.0)
-    feats["ws_rotor_eff_cubed"] = np.maximum(ws_eff3, 0.0)
 
     # ---- historical seasonal average (lookup by month x hour x repairs) ----
     if seasonal_avg is not None:
@@ -249,10 +169,5 @@ def make_features(df: pd.DataFrame, seasonal_avg: pd.Series = None) -> pd.DataFr
         lookup = seasonal_avg.reindex(key)
         lookup.index = df.index
         feats["seasonal_avg"] = lookup.fillna(seasonal_avg.mean()).values
-
-    # ---- rolling temporal features ----
-    if DATETIME_COL in df.columns:
-        roll = _rolling_features(df)
-        feats = pd.concat([feats, roll], axis=1)
 
     return feats
