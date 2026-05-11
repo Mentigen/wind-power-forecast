@@ -36,20 +36,20 @@ DATA_PATH = os.path.join(
 
 LGBM_SEEDS = [SEED + i for i in range(5)]  # [42, 43, 44, 45, 46]
 
-# Hyperparameters found via Optuna search (25 trials, Q1-2025 holdout)
+# Hyperparameters found via Optuna search (25 trials, 3-fold Q1 CV)
 LGBM_PARAMS = {
     "objective": "regression_l1",
     "metric": "mae",
     "n_estimators": 5000,
-    "learning_rate": 0.01693,
-    "max_depth": 6,
-    "num_leaves": 44,
-    "feature_fraction": 0.5959,
-    "bagging_fraction": 0.5591,
+    "learning_rate": 0.03545,
+    "max_depth": 4,
+    "num_leaves": 87,
+    "feature_fraction": 0.4026,
+    "bagging_fraction": 0.5826,
     "bagging_freq": 1,
-    "min_child_samples": 23,
-    "reg_alpha": 0.4697,
-    "reg_lambda": 0.2292,
+    "min_child_samples": 29,
+    "reg_alpha": 0.1076,
+    "reg_lambda": 0.2753,
     "seed": SEED,
     "deterministic": True,
     "force_row_wise": True,
@@ -60,13 +60,13 @@ LGBM_PARAMS = {
 XGB_PARAMS = {
     "objective": "reg:absoluteerror",
     "n_estimators": 5000,
-    "learning_rate": 0.03,
-    "max_depth": 7,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "min_child_weight": 20,
-    "reg_alpha": 0.1,
-    "reg_lambda": 0.1,
+    "learning_rate": 0.04345,
+    "max_depth": 4,
+    "subsample": 0.7289,
+    "colsample_bytree": 0.6404,
+    "min_child_weight": 5,
+    "reg_alpha": 0.8049,
+    "reg_lambda": 0.2256,
     "seed": SEED,
     "nthread": 1,
     "verbosity": 0,
@@ -199,12 +199,23 @@ def main():
         m = train_lgbm(X_train, y_train_cf, n_estimators_override=lgbm_best_n, seed_override=seed)
         pred = clip_predictions(m.predict(X_val) * avail_cap_val, val_repairs)
         lgbm_val_preds.append(pred)
-    lgbm_pred_val = np.mean(lgbm_val_preds, axis=0)
-    mae_lgbm = normalized_mae(y_val, lgbm_pred_val)
-    # Also report single-seed for comparison
-    mae_lgbm_s42 = normalized_mae(y_val, lgbm_val_preds[0])
+    lgbm_pred_avg = np.mean(lgbm_val_preds, axis=0)
+    mae_lgbm_avg = normalized_mae(y_val, lgbm_pred_avg)
+    lgbm_pred_s42 = lgbm_val_preds[0]
+    mae_lgbm_s42 = normalized_mae(y_val, lgbm_pred_s42)
     print(f"  Val MAE single (seed=42): {mae_lgbm_s42:.4f}%")
-    print(f"  Val MAE 5-seed avg:       {mae_lgbm:.4f}%")
+    print(f"  Val MAE 5-seed avg:       {mae_lgbm_avg:.4f}%")
+    # Pick the better LGBM representation for ensemble
+    if mae_lgbm_s42 < mae_lgbm_avg:
+        lgbm_pred_val = lgbm_pred_s42
+        mae_lgbm = mae_lgbm_s42
+        lgbm_use_single = True
+        print("  Using single seed for ensemble (better than avg)")
+    else:
+        lgbm_pred_val = lgbm_pred_avg
+        mae_lgbm = mae_lgbm_avg
+        lgbm_use_single = False
+        print("  Using 5-seed avg for ensemble")
 
     print("\nStep 1: Training XGBoost on CF target (early stopping Q1-2025)...")
     xgb_val = train_xgb(X_train.values, y_train_cf, X_val.values, y_val_cf)
@@ -297,12 +308,12 @@ def main():
 
     meta = {
         "ensemble_mode": ensemble_mode,
-        "lgbm_mode": "multiseed",
-        "lgbm_seeds": LGBM_SEEDS,
+        "lgbm_mode": "single" if lgbm_use_single else "multiseed",
+        "lgbm_seeds": [42] if lgbm_use_single else LGBM_SEEDS,
         "w_lgbm": w_lgbm,
         "w_xgb": w_xgb,
         "mae_lgbm_s42": mae_lgbm_s42,
-        "mae_lgbm_avg": mae_lgbm,
+        "mae_lgbm_avg": mae_lgbm_avg,
         "mae_xgb": mae_xgb,
         "mae_catboost": mae_cb,
         "mae_ensemble": best_val_mae,

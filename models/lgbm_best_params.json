@@ -1,0 +1,15 @@
+{
+  "baseline_cv_mae": 9.491904543619682,
+  "best_cv_mae": 9.390084243512526,
+  "improvement": 0.10182030010715692,
+  "params": {
+    "learning_rate": 0.03544762453684738,
+    "max_depth": 4,
+    "num_leaves": 87,
+    "feature_fraction": 0.40263694270197664,
+    "bagging_fraction": 0.5826480856074511,
+    "min_child_samples": 29,
+    "reg_alpha": 0.10764815529522645,
+    "reg_lambda": 0.2752813388662197
+  }
+}
